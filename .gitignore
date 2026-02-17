@@ -56,10 +56,27 @@ desktop.ini
 *.temp
 diag.txt
 
-# Landing Next.js
-landing/node_modules/
-landing/.next/
-landing/out/
-landing/.vercel
-landing/*.tsbuildinfo
-landing/next-env.d.ts
+# Next.js (ahora en raíz)
+/node_modules
+/.pnp
+.pnp.js
+/.next/
+/out/
+/build
+.vercel
+*.tsbuildinfo
+next-env.d.ts
+
+# testing
+/coverage
+
+# misc
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# local env files
+.env*.local
