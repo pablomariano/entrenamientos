@@ -16,6 +16,7 @@ from polar_rcx5_datalink.datalink import DataLink
 from polar_rcx5_datalink.parser import TrainingSession
 from polar_rcx5_datalink.exceptions import ParserError, SyncError
 from polar_rcx5_datalink.utils import bcd_to_int
+import polar_rcx5_datalink.utils as utils
 
 # Rango fisiológico válido de frecuencia cardíaca (bpm)
 # Valores fuera de este rango son errores de parsing o datos corruptos
@@ -28,6 +29,150 @@ def _hr_valido(hr):
     if hr is None:
         return False
     return HR_MIN_VALID <= hr <= HR_MAX_VALID
+
+
+def extraer_laps_basicos(raw_session):
+    """
+    Extrae información básica de laps desde los datos raw.
+    Intenta detectar patrones de lap data en los bits de la sesión.
+    """
+    try:
+        # Crear una sesión temporal para acceder a los métodos de parsing
+        sess_temp = TrainingSession(raw_session)
+        
+        # Obtener los bits de las muestras
+        samples_bits = sess_temp.tobin()[349 * 8:] if sess_temp.has_gps else sess_temp.tobin()[351 * 8:]
+        
+        # Buscar patrones de lap data (416 bits cada uno)
+        LAP_DATA_BITS_LENGTH = 416
+        laps_detectados = []
+        
+        # Buscar patrones que podrían indicar laps
+        # Basado en el algoritmo del parser original pero simplificado
+        cursor = 0
+        lap_count = 0
+        
+        while cursor < len(samples_bits) - LAP_DATA_BITS_LENGTH:
+            # Buscar patrón que podría indicar inicio de lap
+            # El parser original busca patrones de longitud/latitud
+            chunk = samples_bits[cursor:cursor + LAP_DATA_BITS_LENGTH]
+            
+            # Heurística simple: buscar secuencias que podrían ser lap data
+            # Los laps suelen tener patrones repetitivos y estructurados
+            if len(chunk) == LAP_DATA_BITS_LENGTH:
+                # Convertir chunk a bytes para análisis
+                if len(chunk) % 8 == 0:
+                    try:
+                        bytes_chunk = []
+                        for i in range(0, len(chunk), 8):
+                            byte_str = chunk[i:i+8]
+                            if len(byte_str) == 8:
+                                bytes_chunk.append(int(byte_str, 2))
+                        
+                        # Heurística: si hay suficiente variación en los datos,
+                        # podría ser un lap (no solo padding o datos vacíos)
+                        if len(bytes_chunk) >= 10:
+                            variacion = max(bytes_chunk[:10]) - min(bytes_chunk[:10])
+                            if variacion > 10:  # Umbral arbitrario
+                                lap_count += 1
+                                
+                                # Intentar extraer información básica
+                                # Esto es experimental y puede no ser 100% preciso
+                                lap_info = {
+                                    'lap_number': lap_count,
+                                    'bit_position': cursor,
+                                    'data_length': LAP_DATA_BITS_LENGTH,
+                                    'detected_pattern': True,
+                                    # Información estimada (puede no ser precisa)
+                                    'raw_data_summary': {
+                                        'first_bytes': bytes_chunk[:5],
+                                        'data_variation': variacion,
+                                        'non_zero_bytes': sum(1 for b in bytes_chunk if b != 0)
+                                    }
+                                }
+                                laps_detectados.append(lap_info)
+                                
+                                # Saltar los datos del lap
+                                cursor += LAP_DATA_BITS_LENGTH
+                                continue
+                    except:
+                        pass
+            
+            cursor += 100  # Avanzar en chunks más pequeños
+        
+        return laps_detectados
+        
+    except Exception as e:
+        return {
+            'error': f'Error extrayendo laps: {str(e)}',
+            'laps': []
+        }
+
+
+def extraer_laps_alternativos(sess):
+    """
+    Método alternativo para detectar laps usando el parser existente.
+    Intenta parsear samples y detectar cuando se encuentran laps.
+    """
+    laps_info = []
+    
+    if not sess.has_hr:
+        return laps_info
+    
+    try:
+        # Crear una versión modificada del parser para detectar laps
+        original_cursor = 0
+        lap_count = 0
+        
+        # Simular el proceso de parsing para detectar laps
+        sess_copy = TrainingSession(sess.raw)
+        samples_bits = sess_copy._get_samples_bits()
+        
+        # Usar el método _has_lap_data del parser original
+        cursor = 0
+        sample_count = 0
+        
+        # Parsear samples hasta encontrar laps
+        while cursor < len(samples_bits) - 500:  # Margen de seguridad
+            try:
+                # Simular posición del cursor
+                sess_copy._cursor = cursor
+                
+                # Verificar si hay lap data en esta posición
+                if hasattr(sess_copy, '_has_lap_data'):
+                    if sess_copy._has_lap_data():
+                        lap_count += 1
+                        
+                        # Calcular tiempo aproximado del lap
+                        sample_rate = sess.info.get('sample_rate', 5)
+                        tiempo_aproximado = sample_count * sample_rate
+                        
+                        lap_info = {
+                            'lap_number': lap_count,
+                            'approximate_time_seconds': tiempo_aproximado,
+                            'approximate_time_formatted': f"{tiempo_aproximado // 60:02d}:{tiempo_aproximado % 60:02d}",
+                            'sample_position': sample_count,
+                            'detected_by_parser': True
+                        }
+                        laps_info.append(lap_info)
+                        
+                        # Saltar los datos del lap
+                        cursor += 416  # LAP_DATA_BITS_LENGTH
+                
+                # Avanzar al siguiente sample
+                cursor += 50  # Estimación del tamaño promedio de un sample
+                sample_count += 1
+                
+            except:
+                cursor += 10
+                
+        return laps_info
+        
+    except Exception as e:
+        return [{
+            'error': f'Error en detección alternativa: {str(e)}',
+            'method': 'alternative'
+        }]
 
 
 def extraer_info_basica(raw_session):
@@ -148,6 +293,32 @@ def parsear_sesion_completa(raw_session):
             datos['hr_samples'] = []
             datos['num_hr_samples'] = 0
         
+        # Intentar extraer información de laps
+        laps_info = []
+        try:
+            # Método 1: Extracción básica desde datos raw
+            laps_basicos = extraer_laps_basicos(raw_session)
+            if isinstance(laps_basicos, list) and len(laps_basicos) > 0:
+                laps_info = laps_basicos
+            
+            # Método 2: Si el primer método no funcionó, intentar método alternativo
+            if len(laps_info) == 0:
+                laps_alternativos = extraer_laps_alternativos(sess)
+                if isinstance(laps_alternativos, list) and len(laps_alternativos) > 0:
+                    laps_info = laps_alternativos
+            
+        except Exception as e:
+            # Si hay error en la extracción de laps, continuar sin ellos
+            laps_info = [{
+                'error': f'Error extrayendo laps: {str(e)}',
+                'method': 'error_fallback'
+            }]
+        
+        # Agregar información de laps a los datos
+        datos['laps'] = laps_info
+        datos['num_laps'] = len([lap for lap in laps_info if not lap.get('error')])
+        datos['has_laps'] = datos['num_laps'] > 0
+        
         return datos
         
     except Exception as e:
@@ -157,6 +328,23 @@ def parsear_sesion_completa(raw_session):
         datos_basicos['error_type'] = type(e).__name__
         datos_basicos['hr_samples'] = []
         datos_basicos['num_hr_samples'] = 0
+        
+        # Intentar extraer laps incluso si falla el parsing principal
+        try:
+            laps_basicos = extraer_laps_basicos(raw_session)
+            if isinstance(laps_basicos, list):
+                datos_basicos['laps'] = laps_basicos
+                datos_basicos['num_laps'] = len([lap for lap in laps_basicos if not lap.get('error')])
+                datos_basicos['has_laps'] = datos_basicos['num_laps'] > 0
+            else:
+                datos_basicos['laps'] = []
+                datos_basicos['num_laps'] = 0
+                datos_basicos['has_laps'] = False
+        except:
+            datos_basicos['laps'] = []
+            datos_basicos['num_laps'] = 0
+            datos_basicos['has_laps'] = False
+        
         return datos_basicos
 
 
@@ -231,8 +419,25 @@ def main():
         print(f"para crear tu dashboard, incluyendo:")
         print(f"  - Fechas y duraciones")
         print(f"  - Estadísticas de frecuencia cardíaca (promedio, máximo, mínimo)")
+        print(f"  - Información de laps (vueltas) cuando estén disponibles")
         print(f"\nNOTA: No se incluye información de GPS ni distancias")
         print(f"      porque tu reloj no tiene estas funcionalidades.")
+        
+        # Mostrar estadísticas de laps
+        sesiones_con_laps = sum(1 for s in todas_las_sesiones if s.get('has_laps', False))
+        total_laps = sum(s.get('num_laps', 0) for s in todas_las_sesiones)
+        
+        if sesiones_con_laps > 0:
+            print(f"\n📊 INFORMACIÓN DE LAPS:")
+            print(f"  - Sesiones con laps detectados: {sesiones_con_laps}")
+            print(f"  - Total de laps encontrados: {total_laps}")
+            print(f"  - Promedio de laps por sesión: {total_laps/sesiones_con_laps:.1f}")
+        else:
+            print(f"\n⚠️ No se detectaron laps en las sesiones procesadas.")
+            print(f"   Esto puede deberse a:")
+            print(f"   - Las sesiones no tienen laps configurados")
+            print(f"   - Los datos de laps están en un formato no reconocido")
+            print(f"   - Limitaciones en el algoritmo de detección")
         
     except SyncError as e:
         print(f"\n✗ Error de sincronización: {e}")
