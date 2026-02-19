@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Dashboard de Entrenamientos - Polar RCX5 (HR y Duración)</title>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3/dist/chartjs-plugin-annotation.min.js"></script>
     <style>
         * {
             margin: 0;
@@ -87,14 +88,106 @@
             grid-template-columns: 1.5fr 1fr 1fr 2fr;
             gap: 10px;
             align-items: center;
+            cursor: pointer;
+            transition: background 0.15s;
         }
         
         .session-item:last-child {
             border-bottom: none;
         }
-        
+
         .session-item:hover {
+            background: #f0f0ff;
+        }
+
+        .session-item.active {
+            background: #eef0ff;
+            border-left: 4px solid #667eea;
+        }
+
+        .hr-evolution-panel {
+            background: white;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            display: none;
+        }
+
+        .hr-evolution-panel h2 {
+            color: #667eea;
+            margin-bottom: 15px;
+        }
+
+        .hr-evolution-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 15px;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .hr-evolution-info {
+            padding: 10px 15px;
             background: #f5f5f5;
+            border-radius: 8px;
+            font-size: 0.9em;
+            flex: 1;
+        }
+
+        .hr-evolution-info strong {
+            display: block;
+            margin-bottom: 4px;
+            color: #333;
+        }
+
+        .hr-evolution-info small {
+            color: #666;
+        }
+
+        .btn-close-panel {
+            background: none;
+            border: 2px solid #ccc;
+            border-radius: 6px;
+            padding: 6px 12px;
+            cursor: pointer;
+            color: #666;
+            font-size: 0.85em;
+            white-space: nowrap;
+            transition: all 0.2s;
+        }
+
+        .btn-close-panel:hover {
+            border-color: #667eea;
+            color: #667eea;
+        }
+
+        .laps-legend {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-top: 10px;
+        }
+
+        .lap-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 0.78em;
+            color: #555;
+            padding: 3px 8px;
+            background: #f0f0f0;
+            border-radius: 12px;
+            border: 1px solid #ddd;
+        }
+
+        .lap-badge-line {
+            width: 16px;
+            height: 2px;
+            background: rgba(102, 126, 234, 0.8);
+            display: inline-block;
+            border-top: 2px dashed rgba(102, 126, 234, 0.8);
         }
         
         .badge {
@@ -122,19 +215,6 @@
             padding: 50px;
         }
         
-        #session-selector {
-            transition: all 0.3s ease;
-        }
-        
-        #session-selector:hover {
-            border-color: #764ba2;
-        }
-        
-        #session-selector:focus {
-            outline: none;
-            border-color: #764ba2;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }
     </style>
 </head>
 <body>
@@ -166,29 +246,26 @@
                 <canvas id="chart-duration"></canvas>
             </div>
             
-            <div class="chart-container">
-                <h2>❤️ Evolución de Frecuencia Cardíaca por Sesión</h2>
-                <div style="margin-bottom: 20px;">
-                    <label for="session-selector" style="display: block; margin-bottom: 10px; color: #667eea; font-weight: bold;">
-                        Selecciona una sesión:
-                    </label>
-                    <select id="session-selector" style="width: 100%; padding: 10px; border-radius: 5px; border: 2px solid #667eea; font-size: 1em; background: white; cursor: pointer;">
-                        <option value="">-- Selecciona una sesión --</option>
-                    </select>
+            <div class="sessions-list">
+                <h2 style="margin-bottom: 5px; color: #667eea;">📋 Entrenamientos Recientes</h2>
+                <p style="color: #999; font-size: 0.85em; margin-bottom: 15px;">Haz clic en un entrenamiento para ver la evolución de frecuencia cardíaca</p>
+                <div id="sessions-list"></div>
+            </div>
+
+            <div class="hr-evolution-panel" id="hr-evolution-panel">
+                <div class="hr-evolution-header">
+                    <h2>❤️ Evolución de Frecuencia Cardíaca</h2>
+                    <button class="btn-close-panel" onclick="closeHRPanel()">✕ Cerrar</button>
                 </div>
-                <div id="hr-evolution-info" style="margin-bottom: 15px; padding: 10px; background: #f5f5f5; border-radius: 5px; display: none;">
-                    <strong id="selected-session-name"></strong><br>
+                <div class="hr-evolution-info" id="hr-evolution-info">
+                    <strong id="selected-session-name"></strong>
                     <small id="selected-session-details"></small>
                 </div>
+                <div id="laps-legend" class="laps-legend" style="margin-bottom: 15px;"></div>
                 <canvas id="chart-hr-evolution"></canvas>
                 <div id="no-hr-samples" style="text-align: center; padding: 40px; color: #999; display: none;">
                     Esta sesión no tiene muestras de frecuencia cardíaca disponibles.
                 </div>
-            </div>
-            
-            <div class="sessions-list">
-                <h2 style="margin-bottom: 20px; color: #667eea;">📋 Lista de Entrenamientos</h2>
-                <div id="sessions-list"></div>
             </div>
         </div>
     </div>
@@ -370,19 +447,24 @@
                 }
             });
             
-            // Configurar selector de sesiones para gráfico de evolución HR
-            setupHREvolutionChart(sessions);
+            // (HR evolution se activa al hacer clic en el listado)
             
-            // Lista de sesiones - SOLO HR y duración
-            const sessionsHTML = sessions
-                .sort((a, b) => new Date(b.start_time) - new Date(a.start_time))
-                .map(s => {
+            // Guardar sesiones globalmente para acceso desde click handlers
+            window._allSessions = sessions;
+
+            // Lista de sesiones
+            const sortedSessions = sessions
+                .sort((a, b) => new Date(b.start_time) - new Date(a.start_time));
+
+            const sessionsHTML = sortedSessions.map((s, index) => {
                     const hrInfo = s.hr_avg 
-                        ? `Prom: ${s.hr_avg} | Max: ${s.hr_max || '-'} | Min: ${s.hr_min || '-'}`
+                        ? `Prom: <strong>${s.hr_avg}</strong> | Máx: ${s.hr_max || '-'} | Mín: ${s.hr_min || '-'} bpm`
                         : 'Sin datos HR';
+                    const hasChart = s.has_hr && s.hr_samples && s.hr_samples.length > 0;
+                    const lapsInfo = s.has_laps ? `<span style="color:#667eea;">⚡ ${s.num_laps} laps</span>` : '';
                     
                     return `
-                    <div class="session-item">
+                    <div class="session-item" data-session-index="${index}" onclick="onSessionClick(${index})" title="${hasChart ? 'Ver evolución de FC' : 'Sin datos de HR disponibles'}">
                         <div>
                             <strong>${new Date(s.start_time).toLocaleDateString('es-ES')}</strong><br>
                             <small>${new Date(s.start_time).toLocaleTimeString('es-ES')}</small>
@@ -392,7 +474,8 @@
                             <small>Duración</small>
                         </div>
                         <div>
-                            ${s.has_hr ? '❤️ Con HR' : '⚠️ Sin HR'}
+                            ${hasChart ? '❤️ Ver FC' : (s.has_hr ? '⚠️ HR sin muestras' : '— Sin HR')}
+                            ${lapsInfo ? '<br><small>' + lapsInfo + '</small>' : ''}
                         </div>
                         <div>
                             ${hrInfo}
@@ -434,187 +517,228 @@
         }
         
         let hrEvolutionChart = null;
-        
-        function setupHREvolutionChart(sessions) {
-            const selector = document.getElementById('session-selector');
-            const infoDiv = document.getElementById('hr-evolution-info');
-            const noSamplesDiv = document.getElementById('no-hr-samples');
+
+        function onSessionClick(index) {
+            const session = window._allSessions[index];
+            if (!session) return;
+
+            // Marcar ítem activo
+            document.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
+            const activeItem = document.querySelector(`.session-item[data-session-index="${index}"]`);
+            if (activeItem) activeItem.classList.add('active');
+
+            renderHREvolution(session);
+        }
+
+        function closeHRPanel() {
+            document.getElementById('hr-evolution-panel').style.display = 'none';
+            document.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
+            if (hrEvolutionChart) {
+                hrEvolutionChart.destroy();
+                hrEvolutionChart = null;
+            }
+        }
+
+        function getLapSeparators(laps) {
+            if (!laps || laps.length === 0) return [];
+            const separators = [];
+
+            // Laps con duration_seconds → acumular para obtener tiempo de corte
+            if (laps[0] && laps[0].duration_seconds !== undefined) {
+                let cumulative = 0;
+                for (let i = 0; i < laps.length - 1; i++) {
+                    cumulative += laps[i].duration_seconds;
+                    separators.push({ time_seconds: cumulative, lap_number: i + 1 });
+                }
+            // Laps con approximate_time_seconds → tiempo absoluto desde inicio
+            } else if (laps[0] && laps[0].approximate_time_seconds !== undefined) {
+                laps.forEach(lap => {
+                    separators.push({ time_seconds: lap.approximate_time_seconds, lap_number: lap.lap_number });
+                });
+            }
+
+            return separators;
+        }
+
+        function renderHREvolution(session) {
+            const panel = document.getElementById('hr-evolution-panel');
             const canvas = document.getElementById('chart-hr-evolution');
-            
-            // Llenar selector con sesiones que tienen HR
-            const sessionsWithHR = sessions
-                .filter(s => s.has_hr && s.hr_samples && s.hr_samples.length > 0)
-                .sort((a, b) => new Date(b.start_time) - new Date(a.start_time));
-            
-            sessionsWithHR.forEach((session, index) => {
-                const option = document.createElement('option');
-                option.value = index;
-                const date = new Date(session.start_time);
-                option.textContent = `${date.toLocaleDateString('es-ES')} ${date.toLocaleTimeString('es-ES')} - ${session.duration_formatted}`;
-                selector.appendChild(option);
+            const noSamplesDiv = document.getElementById('no-hr-samples');
+            const lapsLegend = document.getElementById('laps-legend');
+
+            panel.style.display = 'block';
+
+            // Mostrar info de la sesión
+            const date = new Date(session.start_time);
+            document.getElementById('selected-session-name').textContent =
+                `Sesión del ${date.toLocaleDateString('es-ES')} — ${date.toLocaleTimeString('es-ES')}`;
+
+            const details = [
+                `Duración: ${session.duration_formatted || formatDuration(session.duration_seconds || 0)}`,
+                session.hr_avg ? `HR Prom: ${session.hr_avg} bpm` : '',
+                session.hr_max ? `HR Máx: ${session.hr_max} bpm` : '',
+                session.hr_min ? `HR Mín: ${session.hr_min} bpm` : '',
+                session.hr_samples ? `Muestras: ${session.hr_samples.length}` : ''
+            ].filter(Boolean).join('  ·  ');
+            document.getElementById('selected-session-details').textContent = details;
+
+            // Destruir gráfico anterior
+            if (hrEvolutionChart) {
+                hrEvolutionChart.destroy();
+                hrEvolutionChart = null;
+            }
+
+            // Sin muestras de HR
+            if (!session.hr_samples || session.hr_samples.length === 0) {
+                canvas.style.display = 'none';
+                noSamplesDiv.style.display = 'block';
+                lapsLegend.innerHTML = '';
+                panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                return;
+            }
+
+            // Rango fisiológico válido
+            const HR_MIN_VALID = 30;
+            const HR_MAX_VALID = 250;
+
+            const validSamples = session.hr_samples.filter(s =>
+                s.hr != null && s.hr >= HR_MIN_VALID && s.hr <= HR_MAX_VALID
+            );
+
+            if (validSamples.length === 0) {
+                canvas.style.display = 'none';
+                noSamplesDiv.style.display = 'block';
+                noSamplesDiv.textContent = 'No hay muestras en rango válido (30–250 bpm). Los datos pueden estar corruptos.';
+                lapsLegend.innerHTML = '';
+                panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                return;
+            }
+
+            const hrValues = validSamples.map(s => s.hr);
+            const minHR = Math.min(...hrValues);
+            const maxHR = Math.max(...hrValues);
+            const avgHR = hrValues.reduce((a, b) => a + b, 0) / hrValues.length;
+
+            const hrData = validSamples.map(s => ({ x: s.time_seconds / 60, y: s.hr }));
+            const maxTimeMins = Math.max(...hrData.map(d => d.x));
+
+            // Ejes dinámicos
+            const yMin = Math.max(30, Math.floor((minHR - 10) / 10) * 10);
+            const yMax = Math.ceil((maxHR + 10) / 10) * 10;
+            const xMax = Math.ceil(maxTimeMins / 5) * 5;
+
+            // Laps
+            const lapSeparators = getLapSeparators(session.laps || []);
+
+            // Construir annotations de laps
+            const annotations = {};
+            lapSeparators.forEach((lap, i) => {
+                const xVal = lap.time_seconds / 60;
+                if (xVal > 0 && xVal < maxTimeMins) {
+                    annotations[`lap${i}`] = {
+                        type: 'line',
+                        xMin: xVal,
+                        xMax: xVal,
+                        borderColor: 'rgba(102, 126, 234, 0.75)',
+                        borderWidth: 2,
+                        borderDash: [6, 3],
+                        label: {
+                            display: true,
+                            content: `Lap ${lap.lap_number}`,
+                            position: 'start',
+                            backgroundColor: 'rgba(102, 126, 234, 0.15)',
+                            color: '#5565cc',
+                            font: { size: 11, weight: 'bold' },
+                            padding: { x: 4, y: 2 },
+                            borderRadius: 4
+                        }
+                    };
+                }
             });
-            
-            // Guardar sesiones en el selector para acceso rápido
-            selector.sessionsData = sessionsWithHR;
-            
-            // Event listener para cambio de selección
-            selector.addEventListener('change', function() {
-                const selectedIndex = this.value;
-                
-                if (selectedIndex === '' || selectedIndex === null) {
-                    // Ocultar gráfico si no hay selección
-                    if (hrEvolutionChart) {
-                        hrEvolutionChart.destroy();
-                        hrEvolutionChart = null;
-                    }
-                    infoDiv.style.display = 'none';
-                    noSamplesDiv.style.display = 'none';
-                    canvas.style.display = 'none';
-                    return;
-                }
-                
-                const selectedSession = sessionsWithHR[parseInt(selectedIndex)];
-                
-                if (!selectedSession || !selectedSession.hr_samples || selectedSession.hr_samples.length === 0) {
-                    // No hay muestras de HR
-                    if (hrEvolutionChart) {
-                        hrEvolutionChart.destroy();
-                        hrEvolutionChart = null;
-                    }
-                    infoDiv.style.display = 'none';
-                    canvas.style.display = 'none';
-                    noSamplesDiv.style.display = 'block';
-                    return;
-                }
-                
-                // Mostrar información de la sesión
-                const date = new Date(selectedSession.start_time);
-                document.getElementById('selected-session-name').textContent = 
-                    `Sesión del ${date.toLocaleDateString('es-ES')} ${date.toLocaleTimeString('es-ES')}`;
-                
-                const details = [
-                    `Duración: ${selectedSession.duration_formatted}`,
-                    selectedSession.hr_avg ? `HR Promedio: ${selectedSession.hr_avg} bpm` : '',
-                    selectedSession.hr_max ? `HR Máximo: ${selectedSession.hr_max} bpm` : '',
-                    selectedSession.hr_min ? `HR Mínimo: ${selectedSession.hr_min} bpm` : '',
-                    `Muestras: ${selectedSession.hr_samples.length}`
-                ].filter(d => d).join(' | ');
-                
-                document.getElementById('selected-session-details').textContent = details;
-                infoDiv.style.display = 'block';
-                noSamplesDiv.style.display = 'none';
-                canvas.style.display = 'block';
-                
-                // Crear o actualizar gráfico
-                if (hrEvolutionChart) {
-                    hrEvolutionChart.destroy();
-                }
-                
-                // Rango fisiológico válido (bpm). Valores fuera son errores de parsing.
-                const HR_MIN = 30;
-                const HR_MAX = 250;
-                
-                // Filtrar muestras con HR en rango válido
-                const validSamples = selectedSession.hr_samples.filter(s => 
-                    s.hr != null && s.hr >= HR_MIN && s.hr <= HR_MAX
-                );
-                
-                // Preparar datos para el gráfico (solo valores válidos)
-                const hrData = validSamples.map(sample => ({
-                    x: sample.time_seconds / 60,
-                    y: sample.hr
-                }));
-                
-                // Calcular estadísticas solo con valores válidos
-                const hrValues = validSamples.map(s => s.hr);
-                const minHR = hrValues.length > 0 ? Math.min(...hrValues) : 60;
-                const maxHR = hrValues.length > 0 ? Math.max(...hrValues) : 180;
-                const avgHR = hrValues.length > 0 ? hrValues.reduce((a, b) => a + b, 0) / hrValues.length : 0;
-                
-                if (hrData.length === 0) {
-                    if (hrEvolutionChart) {
-                        hrEvolutionChart.destroy();
-                        hrEvolutionChart = null;
-                    }
-                    infoDiv.style.display = 'block';
-                    document.getElementById('selected-session-details').textContent = 
-                        'No hay muestras de HR en rango válido (30-250 bpm). Los datos pueden estar corruptos.';
-                    noSamplesDiv.style.display = 'block';
-                    canvas.style.display = 'none';
-                    return;
-                }
-                
-                hrEvolutionChart = new Chart(canvas, {
-                    type: 'line',
-                    data: {
-                        datasets: [{
+
+            // Leyenda de laps
+            if (lapSeparators.length > 0) {
+                lapsLegend.innerHTML = lapSeparators.map(lap => {
+                    const mins = Math.floor(lap.time_seconds / 60);
+                    const secs = lap.time_seconds % 60;
+                    return `<span class="lap-badge"><span class="lap-badge-line"></span>Lap ${lap.lap_number} — ${mins}:${String(secs).padStart(2,'0')}</span>`;
+                }).join('');
+            } else {
+                lapsLegend.innerHTML = '';
+            }
+
+            noSamplesDiv.style.display = 'none';
+            canvas.style.display = 'block';
+
+            hrEvolutionChart = new Chart(canvas, {
+                type: 'line',
+                data: {
+                    datasets: [
+                        {
                             label: 'Frecuencia Cardíaca (bpm)',
                             data: hrData,
                             borderColor: 'rgba(255, 99, 132, 1)',
                             backgroundColor: 'rgba(255, 99, 132, 0.1)',
-                            tension: 0.4,
+                            tension: 0.3,
                             fill: true,
-                            pointRadius: 2,
-                            pointHoverRadius: 4
-                        }, {
-                            label: 'HR Promedio',
-                            data: hrData.map(d => ({ x: d.x, y: avgHR })),
-                            borderColor: 'rgba(75, 192, 192, 1)',
+                            pointRadius: hrData.length > 200 ? 0 : 2,
+                            pointHoverRadius: 4,
+                            borderWidth: 1.5
+                        },
+                        {
+                            label: `Promedio (${Math.round(avgHR)} bpm)`,
+                            data: [{ x: 0, y: avgHR }, { x: xMax, y: avgHR }],
+                            borderColor: 'rgba(75, 192, 192, 0.9)',
                             borderDash: [5, 5],
                             borderWidth: 2,
                             pointRadius: 0,
                             fill: false
-                        }]
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    interaction: { intersect: false, mode: 'index' },
+                    plugins: {
+                        legend: { display: true, position: 'top' },
+                        tooltip: {
+                            callbacks: {
+                                title: ctx => {
+                                    const mins = Math.floor(ctx[0].parsed.x);
+                                    const secs = Math.round((ctx[0].parsed.x - mins) * 60);
+                                    return `${mins}:${String(secs).padStart(2,'0')} min`;
+                                },
+                                label: ctx => {
+                                    if (ctx.datasetIndex === 0) return `FC: ${ctx.parsed.y} bpm`;
+                                    return `Promedio: ${ctx.parsed.y.toFixed(1)} bpm`;
+                                }
+                            }
+                        },
+                        annotation: { annotations }
                     },
-                    options: {
-                        responsive: true,
-                        interaction: {
-                            intersect: false,
-                            mode: 'index'
-                        },
-                        plugins: {
-                            legend: {
-                                display: true,
-                                position: 'top'
-                            },
-                            tooltip: {
-                                callbacks: {
-                                    label: function(context) {
-                                        if (context.datasetIndex === 0) {
-                                            return `HR: ${context.parsed.y} bpm`;
-                                        } else {
-                                            return `Promedio: ${context.parsed.y.toFixed(1)} bpm`;
-                                        }
-                                    }
-                                }
+                    scales: {
+                        x: {
+                            type: 'linear',
+                            title: { display: true, text: 'Tiempo (minutos)' },
+                            min: 0,
+                            max: xMax,
+                            ticks: {
+                                stepSize: xMax <= 30 ? 2 : xMax <= 60 ? 5 : 10,
+                                callback: val => `${val} min`
                             }
                         },
-                        scales: {
-                            x: {
-                                type: 'linear',
-                                title: {
-                                    display: true,
-                                    text: 'Tiempo (minutos)'
-                                },
-                                min: 0,
-                                max: Math.max(10, Math.ceil((hrData.length > 0 ? Math.max(...hrData.map(d => d.x)) : 0) / 5) * 5),
-                                ticks: {
-                                    stepSize: 5
-                                }
-                            },
-                            y: {
-                                title: {
-                                    display: true,
-                                    text: 'Frecuencia Cardíaca (bpm)'
-                                },
-                                min: 40,
-                                max: 220,
-                                beginAtZero: false
-                            }
+                        y: {
+                            title: { display: true, text: 'Frecuencia Cardíaca (bpm)' },
+                            min: yMin,
+                            max: yMax,
+                            beginAtZero: false,
+                            ticks: { callback: val => `${val} bpm` }
                         }
                     }
-                });
+                }
             });
+
+            panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
         }
     </script>
 </body>
