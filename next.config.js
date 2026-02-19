@@ -2,7 +2,9 @@
 const nextConfig = {
   // output: 'standalone' - desactivado para Vercel (causaba 404 en assets)
   reactStrictMode: true,
-  experimental: {},
+  experimental: {
+    turbopack: {},
+  },
   webpack: (config) => {
     config.resolve.alias = {
       ...config.resolve.alias,
