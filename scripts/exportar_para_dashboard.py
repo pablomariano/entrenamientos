@@ -17,6 +17,38 @@ from polar_rcx5_datalink.parser import TrainingSession
 from polar_rcx5_datalink.exceptions import ParserError, SyncError
 from polar_rcx5_datalink.utils import bcd_to_int
 import polar_rcx5_datalink.utils as utils
+import pytz
+import tzlocal
+
+# tzlocal >= 3.0 retorna ZoneInfo en lugar de un timezone de pytz,
+# pero la librería llama .localize() que solo existe en pytz.
+# Reemplazamos datetime_to_utc por una versión compatible.
+def _datetime_to_utc_fixed(dt, timezone=None):
+    if timezone is None:
+        tz = pytz.timezone(str(tzlocal.get_localzone()))
+    else:
+        tz = pytz.timezone(timezone)
+    return tz.localize(dt, is_dst=None).astimezone(pytz.utc)
+
+utils.datetime_to_utc = _datetime_to_utc_fixed
+
+# geopy lanza ValueError cuando lat/lon están fuera de rango (-90..90 / -180..180).
+# En sesiones donde el GPS falló o los datos están corruptos esto mata el parsing
+# completo, perdiendo todos los samples de HR. Parcheamos para ignorar el error.
+def _safe_calculate_distance(self, coord1, coord2):
+    try:
+        lat1, lon1 = coord1
+        lat2, lon2 = coord2
+        if (lat1 is None or lon1 is None or lat2 is None or lon2 is None
+                or abs(lat1) > 90 or abs(lon1) > 180
+                or abs(lat2) > 90 or abs(lon2) > 180):
+            return 0.0
+        import geopy.distance
+        return geopy.distance.distance(coord1, coord2).meters
+    except Exception:
+        return 0.0
+
+TrainingSession._calculate_distance = _safe_calculate_distance
 
 # Rango fisiológico válido de frecuencia cardíaca (bpm)
 # Valores fuera de este rango son errores de parsing o datos corruptos
@@ -211,7 +243,6 @@ def extraer_info_basica(raw_session):
             'hr_avg': hr_avg,
             'hr_max': hr_max,
             'hr_min': hr_min,
-            'parseable': False,  # Marcamos que no se pudo parsear completamente
         }
     except Exception as e:
         return {
@@ -224,14 +255,21 @@ def parsear_sesion_completa(raw_session):
     """Extrae solo información de duración y frecuencia cardíaca, incluyendo muestras de HR."""
     try:
         sess = TrainingSession(raw_session)
-        
+
+        # El byte 166 del protocolo queda en True aunque el reloj no tenga GPS.
+        # El parser GPS intenta leer coordenadas/velocidad/satélites donde solo
+        # hay datos de HR, produciendo crashes o samples truncados. Forzamos
+        # modo no-GPS y recalculamos el inicio del stream de bits (351 vs 349).
+        if sess.has_gps:
+            sess.has_gps = False
+            sess._samples_bits = sess._get_samples_bits()
+
         # Intentar parsear muestras de HR (solo si tiene HR, sin necesidad de GPS)
         muestras_hr = []
         muestras_parseadas = False
         
         if sess.has_hr:
             try:
-                # Intentar parsear muestras - funciona incluso sin GPS
                 sess.parse_samples()
                 muestras_parseadas = True
                 
@@ -272,12 +310,8 @@ def parsear_sesion_completa(raw_session):
             hr_max = sess.info.get('hr_max')
             hr_min = sess.info.get('hr_min')
             datos['hr_avg'] = hr_avg if _hr_valido(hr_avg) else None
-            datos['hr_max'] = min(hr_max, HR_MAX_VALID) if hr_max is not None else None
-            datos['hr_min'] = max(hr_min, HR_MIN_VALID) if hr_min is not None else None
-            if datos['hr_max'] is not None and datos['hr_max'] > HR_MAX_VALID:
-                datos['hr_max'] = HR_MAX_VALID
-            if datos['hr_min'] is not None and datos['hr_min'] < HR_MIN_VALID:
-                datos['hr_min'] = HR_MIN_VALID
+            datos['hr_max'] = hr_max if _hr_valido(hr_max) else None
+            datos['hr_min'] = hr_min if _hr_valido(hr_min) else None
             datos['sample_rate_seconds'] = sess.info.get('sample_rate', 5)
         else:
             datos['hr_avg'] = None
@@ -285,34 +319,45 @@ def parsear_sesion_completa(raw_session):
             datos['hr_min'] = None
             datos['sample_rate_seconds'] = None
         
-        # Incluir muestras de HR si se pudieron parsear
-        if muestras_parseadas and len(muestras_hr) > 0:
+        # Incluir muestras de HR para gráficos de evolución
+        if muestras_parseadas and muestras_hr:
             datos['hr_samples'] = muestras_hr
             datos['num_hr_samples'] = len(muestras_hr)
         else:
             datos['hr_samples'] = []
             datos['num_hr_samples'] = 0
-        
+
         # Intentar extraer información de laps
         laps_info = []
         try:
-            # Método 1: Extracción básica desde datos raw
-            laps_basicos = extraer_laps_basicos(raw_session)
-            if isinstance(laps_basicos, list) and len(laps_basicos) > 0:
-                laps_info = laps_basicos
-            
-            # Método 2: Si el primer método no funcionó, intentar método alternativo
-            if len(laps_info) == 0:
+            # Método directo: usar sess.laps si la librería lo expone
+            if hasattr(sess, 'laps') and sess.laps:
+                for i, lap in enumerate(sess.laps, 1):
+                    lap_data = {'lap_number': i}
+                    if hasattr(lap, 'duration'):
+                        lap_data['duration_seconds'] = lap.duration
+                        lap_data['duration_formatted'] = f"{lap.duration // 60:02d}:{lap.duration % 60:02d}"
+                    if hasattr(lap, 'hr_avg') and _hr_valido(lap.hr_avg):
+                        lap_data['hr_avg'] = lap.hr_avg
+                    if hasattr(lap, 'hr_max') and _hr_valido(lap.hr_max):
+                        lap_data['hr_max'] = lap.hr_max
+                    if hasattr(lap, 'hr_min') and _hr_valido(lap.hr_min):
+                        lap_data['hr_min'] = lap.hr_min
+                    laps_info.append(lap_data)
+
+            # Fallback: métodos alternativos si lo anterior no produjo laps
+            if not laps_info:
+                laps_basicos = extraer_laps_basicos(raw_session)
+                if isinstance(laps_basicos, list) and laps_basicos:
+                    laps_info = laps_basicos
+
+            if not laps_info:
                 laps_alternativos = extraer_laps_alternativos(sess)
-                if isinstance(laps_alternativos, list) and len(laps_alternativos) > 0:
+                if isinstance(laps_alternativos, list) and laps_alternativos:
                     laps_info = laps_alternativos
-            
-        except Exception as e:
-            # Si hay error en la extracción de laps, continuar sin ellos
-            laps_info = [{
-                'error': f'Error extrayendo laps: {str(e)}',
-                'method': 'error_fallback'
-            }]
+
+        except Exception:
+            laps_info = []
         
         # Agregar información de laps a los datos
         datos['laps'] = laps_info
@@ -321,30 +366,12 @@ def parsear_sesion_completa(raw_session):
         
         return datos
         
-    except Exception as e:
-        # Si falla el parsing, intentar extraer info básica
+    except Exception:
+        # Si falla el parsing, devolver solo la información básica del header
         datos_basicos = extraer_info_basica(raw_session)
-        datos_basicos['error_parsing'] = str(e)
-        datos_basicos['error_type'] = type(e).__name__
-        datos_basicos['hr_samples'] = []
-        datos_basicos['num_hr_samples'] = 0
-        
-        # Intentar extraer laps incluso si falla el parsing principal
-        try:
-            laps_basicos = extraer_laps_basicos(raw_session)
-            if isinstance(laps_basicos, list):
-                datos_basicos['laps'] = laps_basicos
-                datos_basicos['num_laps'] = len([lap for lap in laps_basicos if not lap.get('error')])
-                datos_basicos['has_laps'] = datos_basicos['num_laps'] > 0
-            else:
-                datos_basicos['laps'] = []
-                datos_basicos['num_laps'] = 0
-                datos_basicos['has_laps'] = False
-        except:
-            datos_basicos['laps'] = []
-            datos_basicos['num_laps'] = 0
-            datos_basicos['has_laps'] = False
-        
+        datos_basicos['laps'] = []
+        datos_basicos['num_laps'] = 0
+        datos_basicos['has_laps'] = False
         return datos_basicos
 
 
