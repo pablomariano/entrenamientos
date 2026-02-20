@@ -375,15 +375,63 @@ def parsear_sesion_completa(raw_session):
         return datos_basicos
 
 
+def pedir_filtro_meses():
+    """Pregunta al usuario cuántos meses hacia atrás exportar. Retorna None para todo."""
+    print("\nFiltro de fecha:")
+    print("  0  = Exportar TODAS las sesiones")
+    print("  N  = Exportar solo los últimos N meses (ej: 2, 6, 12)")
+    while True:
+        respuesta = input("¿Cuántos meses? [0 para todas]: ").strip()
+        if respuesta == '' or respuesta == '0':
+            return None
+        try:
+            meses = int(respuesta)
+            if meses > 0:
+                return meses
+            print("  Ingresá un número mayor a 0, o 0 para todas.")
+        except ValueError:
+            print("  Valor inválido. Ingresá un número entero.")
+
+
+def fecha_limite(meses):
+    """Retorna el primer día del mes que resulta de restar N meses a hoy."""
+    hoy = datetime.now()
+    total_meses = hoy.year * 12 + (hoy.month - 1) - meses
+    anio_destino = total_meses // 12
+    mes_destino = total_meses % 12 + 1
+    return hoy.replace(year=anio_destino, month=mes_destino, day=1,
+                       hour=0, minute=0, second=0, microsecond=0)
+
+
+def sesion_dentro_del_filtro(datos, limite):
+    """Retorna True si la sesión está dentro del período a exportar."""
+    if limite is None:
+        return True
+    start_str = datos.get('start_time')
+    if not start_str:
+        return True
+    try:
+        start = datetime.fromisoformat(start_str)
+        return start >= limite
+    except ValueError:
+        return True
+
+
 def main():
     print("="*80)
     print("EXPORTADOR PARA DASHBOARD - Polar RCX5")
     print("="*80)
-    print("\nEste script exporta todas las sesiones en formato JSON estructurado")
-    print("para usar en tu dashboard, incluyendo información básica de sesiones")
-    print("que no se pueden parsear completamente.\n")
-    
-    input("Presiona ENTER cuando hayas seleccionado 'Connect > Start synchronizing' en tu reloj...")
+    print("\nEste script exporta sesiones de entrenamiento en formato JSON estructurado.\n")
+
+    filtro_meses = pedir_filtro_meses()
+    limite_fecha = fecha_limite(filtro_meses) if filtro_meses else None
+
+    if limite_fecha:
+        print(f"\n  → Exportando sesiones desde {limite_fecha.strftime('%d/%m/%Y')} en adelante")
+    else:
+        print("\n  → Exportando TODAS las sesiones")
+
+    input("\nPresiona ENTER cuando hayas seleccionado 'Connect > Start synchronizing' en tu reloj...")
     
     output_dir = Path(r'C:\Users\Pablo\Desktop\entrenamientos_dashboard')
     output_dir.mkdir(exist_ok=True)
@@ -400,32 +448,31 @@ def main():
         # Procesar cada sesión
         print(f"\n[2/3] Procesando sesiones...")
         todas_las_sesiones = []
-        sesiones_exitosas = 0
-        sesiones_basicas = 0
+        sesiones_omitidas = 0
         
         for i, raw_session in enumerate(raw_sessions, 1):
             print(f"  Procesando sesión {i}/{len(raw_sessions)}...", end=' ')
             
             datos = parsear_sesion_completa(raw_session)
-            
-            if datos.get('parseable'):
-                sesiones_exitosas += 1
-                print("✓ Parseada completamente")
-            else:
-                sesiones_basicas += 1
-                print("⚠ Solo información básica")
-            
+
+            if not sesion_dentro_del_filtro(datos, limite_fecha):
+                sesiones_omitidas += 1
+                fecha = datos.get('start_time', '?')[:10]
+                print(f"omitida (fuera del período: {fecha})")
+                continue
+
             todas_las_sesiones.append(datos)
+            print("✓")
         
         # Guardar en archivo JSON
         print(f"\n[3/3] Guardando datos...")
         output_file = output_dir / 'entrenamientos.json'
-        
+
         resultado = {
             'export_date': datetime.now().isoformat(),
+            'filter_months': filtro_meses,
+            'filter_from': limite_fecha.isoformat() if limite_fecha else None,
             'total_sessions': len(todas_las_sesiones),
-            'sessions_fully_parseable': sesiones_exitosas,
-            'sessions_basic_info_only': sesiones_basicas,
             'sessions': todas_las_sesiones
         }
         
@@ -438,17 +485,14 @@ def main():
         print(f"\n{'='*80}")
         print("RESUMEN")
         print(f"{'='*80}")
-        print(f"Total de sesiones: {len(todas_las_sesiones)}")
-        print(f"✓ Sesiones completamente parseadas: {sesiones_exitosas}")
-        print(f"⚠ Sesiones con solo información básica: {sesiones_basicas}")
-        print(f"\nArchivo JSON creado: {output_file}")
-        print(f"\nEste archivo contiene todos los datos estructurados que necesitas")
-        print(f"para crear tu dashboard, incluyendo:")
-        print(f"  - Fechas y duraciones")
-        print(f"  - Estadísticas de frecuencia cardíaca (promedio, máximo, mínimo)")
-        print(f"  - Información de laps (vueltas) cuando estén disponibles")
-        print(f"\nNOTA: No se incluye información de GPS ni distancias")
-        print(f"      porque tu reloj no tiene estas funcionalidades.")
+        if filtro_meses:
+            print(f"Período:           últimos {filtro_meses} mes(es) (desde {limite_fecha.strftime('%d/%m/%Y')})")
+        else:
+            print(f"Período:           todas las sesiones")
+        print(f"Sesiones incluidas:{len(todas_las_sesiones)}")
+        if sesiones_omitidas:
+            print(f"Sesiones omitidas: {sesiones_omitidas} (fuera del período)")
+        print(f"\nArchivo JSON: {output_file}")
         
         # Mostrar estadísticas de laps
         sesiones_con_laps = sum(1 for s in todas_las_sesiones if s.get('has_laps', False))
