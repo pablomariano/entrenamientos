@@ -149,16 +149,33 @@ export function HREvolutionChart({ session, onClose }: HREvolutionChartProps) {
             </div>
             {lapSeparators.length > 0 && (
               <div className="flex flex-wrap gap-2 mt-2">
-                {lapSeparators.map((lap) => {
-                  const mins = Math.floor(lap.time_seconds / 60)
-                  const secs = lap.time_seconds % 60
+                {[
+                  // Un badge por cada segmento entre marcadores
+                  ...lapSeparators.map((lap, i) => {
+                    const prevTime = i === 0 ? 0 : lapSeparators[i - 1].time_seconds
+                    return { lapNumber: lap.lap_number, duration: lap.time_seconds - prevTime }
+                  }),
+                  // Último segmento: desde el último marcador hasta el fin de la sesión
+                  ...(session.duration_seconds > lapSeparators[lapSeparators.length - 1].time_seconds
+                    ? [{
+                        lapNumber: lapSeparators.length + 1,
+                        duration: session.duration_seconds - lapSeparators[lapSeparators.length - 1].time_seconds,
+                      }]
+                    : []),
+                ].map(({ lapNumber, duration }) => {
+                  const h = Math.floor(duration / 3600)
+                  const m = Math.floor((duration % 3600) / 60)
+                  const s = duration % 60
+                  const label = h > 0
+                    ? `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`
+                    : `${m}:${String(s).padStart(2, "0")}`
                   return (
                     <span
-                      key={lap.lap_number}
+                      key={lapNumber}
                       className="inline-flex items-center gap-1.5 text-xs bg-indigo-50 text-indigo-700 border border-indigo-200 rounded-full px-2.5 py-0.5"
                     >
                       <span className="w-3 border-t-2 border-dashed border-indigo-400 inline-block" />
-                      Lap {lap.lap_number} — {mins}:{String(secs).padStart(2, "0")}
+                      Lap {lapNumber} — {label}
                     </span>
                   )
                 })}
