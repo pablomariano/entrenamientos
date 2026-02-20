@@ -9,6 +9,8 @@ import { HRChart } from "@/components/charts/hr-chart"
 import { DurationChart } from "@/components/charts/duration-chart"
 import { SessionsList } from "@/components/sessions-list"
 import { HREvolutionChart } from "@/components/charts/hr-evolution-chart"
+import { ExerciseMinutes } from "@/components/charts/exercise-minutes"
+import { HRSessionChart } from "@/components/charts/hr-session-chart"
 import { Button } from "@/components/ui/button"
 import { ArrowLeft, Activity } from "lucide-react"
 
@@ -118,9 +120,16 @@ export default function Dashboard() {
           onSelectSession={handleSelectSession}
         />
 
-        {/* HR Evolution Chart — se muestra al hacer clic en una sesión */}
+        {/* Panel de sesión — se muestra al hacer clic en el listado */}
         {selectedSession && (
-          <div ref={hrChartRef}>
+          <div ref={hrChartRef} className="space-y-4 mt-4">
+            {/* Fila 1: gráfico compacto full width */}
+            <HRSessionChart session={selectedSession} />
+
+            {/* Fila 2: minutos de ejercicio */}
+            <ExerciseMinutes session={selectedSession} />
+
+            {/* Fila 2: gráfico detallado con marcadores de laps */}
             <HREvolutionChart
               session={selectedSession}
               onClose={() => setSelectedSession(null)}

@@ -1,4 +1,4 @@
-# 🎨 Dashboard Web
+# 🎨 Antiguo Dashboard Web
 
 Dashboard interactivo para visualizar entrenamientos del Polar RCX5.
 
