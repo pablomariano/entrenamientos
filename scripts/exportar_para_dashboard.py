@@ -51,9 +51,14 @@ def _safe_calculate_distance(self, coord1, coord2):
 TrainingSession._calculate_distance = _safe_calculate_distance
 
 # Rango fisiológico válido de frecuencia cardíaca (bpm)
-# Valores fuera de este rango son errores de parsing o datos corruptos
 HR_MIN_VALID = 30
 HR_MAX_VALID = 250
+
+# Detección de laps sin GPS:
+# Cuando el reloj registra un lap, inserta un bloque de 416 bits (casi todos ceros)
+# en el stream entre muestras de HR. Detectamos esos bloques por su baja densidad.
+LAP_DATA_BITS    = TrainingSession._LAP_DATA_BITS_LENGTH  # 416
+LAP_DENSITY_MAX  = 0.15   # < 15% de bits en 1 → bloque de lap
 
 
 def _hr_valido(hr):
@@ -63,148 +68,91 @@ def _hr_valido(hr):
     return HR_MIN_VALID <= hr <= HR_MAX_VALID
 
 
-def extraer_laps_basicos(raw_session):
+def detectar_laps_nogps(sess):
     """
-    Extrae información básica de laps desde los datos raw.
-    Intenta detectar patrones de lap data en los bits de la sesión.
+    Escanea el stream de bits de una sesión sin GPS buscando bloques de lap.
+
+    El reloj inserta bloques de 416 bits (casi puros ceros) en el stream entre
+    muestras de HR cuando se registra un lap. Los detectamos por densidad < 15%.
+
+    Parsea HR muestra a muestra para tener un conteo preciso al momento de cada
+    lap, lo que permite calcular el tiempo de cada vuelta.
+
+    Retorna lista de laps con timing, y el conteo del header (byte 161).
     """
+    bits        = sess._samples_bits
+    sample_rate = sess.info.get('sample_rate', 5)
+    cursor      = 0
+    n_samples   = 0
+    last_hr     = None
+    zero_delta  = 0
+    laps        = []
+
+    def leer_hr(pos):
+        nonlocal last_hr, zero_delta
+        if pos + 6 > len(bits):
+            return None, 0
+        p = bits[pos:pos+2]
+        if p == '01':
+            if pos + 11 > len(bits): return None, 0
+            hr = int(bits[pos+3:pos+11], 2)
+            zero_delta = 0; last_hr = hr; return hr, 11
+        elif p == '00':
+            if pos + 11 > len(bits): return None, 0
+            hr = int(bits[pos:pos+11], 2)
+            zero_delta = 0; last_hr = hr; return hr, 11
+        elif p == '10':
+            if pos + 6 > len(bits): return None, 0
+            delta = int(bits[pos+2:pos+6], 2)
+            hr = (last_hr or 0) + delta
+            zero_delta = zero_delta + 1 if delta == 0 else 0
+            last_hr = hr; return hr, 6
+        elif p == '11':
+            if pos + 6 > len(bits): return None, 0
+            delta = -((int(bits[pos+2:pos+6], 2) ^ 0b1111) + 1)
+            hr = (last_hr or 0) + delta
+            zero_delta = zero_delta + 1 if delta == 0 else 0
+            last_hr = hr; return hr, 6
+        return None, 0
+
+    # Primera muestra
+    hr, consumed = leer_hr(cursor)
+    if consumed:
+        cursor += consumed
+        n_samples = 1
+
+    while cursor < len(bits) - 6 and len(bits[cursor:cursor+7]) > 5:
+        # Antes de parsear la siguiente muestra, verificar si hay bloque de lap
+        if cursor + LAP_DATA_BITS <= len(bits):
+            chunk   = bits[cursor:cursor + LAP_DATA_BITS]
+            density = chunk.count('1') / LAP_DATA_BITS
+            if density < LAP_DENSITY_MAX:
+                t = n_samples * sample_rate
+                laps.append({
+                    'lap_number':       len(laps) + 1,
+                    'time_seconds':     t,
+                    'time_formatted':   f"{t//3600:02d}:{(t%3600)//60:02d}:{t%60:02d}",
+                })
+                cursor     += LAP_DATA_BITS
+                zero_delta  = 0
+                last_hr     = None
+                continue
+
+        hr, consumed = leer_hr(cursor)
+        if not consumed:
+            break
+        cursor    += consumed
+        n_samples += 1
+
+    # Conteo de laps del header (byte 161, identificado por análisis binario)
     try:
-        # Crear una sesión temporal para acceder a los métodos de parsing
-        sess_temp = TrainingSession(raw_session)
-        
-        # Obtener los bits de las muestras
-        samples_bits = sess_temp.tobin()[349 * 8:] if sess_temp.has_gps else sess_temp.tobin()[351 * 8:]
-        
-        # Buscar patrones de lap data (416 bits cada uno)
-        LAP_DATA_BITS_LENGTH = 416
-        laps_detectados = []
-        
-        # Buscar patrones que podrían indicar laps
-        # Basado en el algoritmo del parser original pero simplificado
-        cursor = 0
-        lap_count = 0
-        
-        while cursor < len(samples_bits) - LAP_DATA_BITS_LENGTH:
-            # Buscar patrón que podría indicar inicio de lap
-            # El parser original busca patrones de longitud/latitud
-            chunk = samples_bits[cursor:cursor + LAP_DATA_BITS_LENGTH]
-            
-            # Heurística simple: buscar secuencias que podrían ser lap data
-            # Los laps suelen tener patrones repetitivos y estructurados
-            if len(chunk) == LAP_DATA_BITS_LENGTH:
-                # Convertir chunk a bytes para análisis
-                if len(chunk) % 8 == 0:
-                    try:
-                        bytes_chunk = []
-                        for i in range(0, len(chunk), 8):
-                            byte_str = chunk[i:i+8]
-                            if len(byte_str) == 8:
-                                bytes_chunk.append(int(byte_str, 2))
-                        
-                        # Heurística: si hay suficiente variación en los datos,
-                        # podría ser un lap (no solo padding o datos vacíos)
-                        if len(bytes_chunk) >= 10:
-                            variacion = max(bytes_chunk[:10]) - min(bytes_chunk[:10])
-                            if variacion > 10:  # Umbral arbitrario
-                                lap_count += 1
-                                
-                                # Intentar extraer información básica
-                                # Esto es experimental y puede no ser 100% preciso
-                                lap_info = {
-                                    'lap_number': lap_count,
-                                    'bit_position': cursor,
-                                    'data_length': LAP_DATA_BITS_LENGTH,
-                                    'detected_pattern': True,
-                                    # Información estimada (puede no ser precisa)
-                                    'raw_data_summary': {
-                                        'first_bytes': bytes_chunk[:5],
-                                        'data_variation': variacion,
-                                        'non_zero_bytes': sum(1 for b in bytes_chunk if b != 0)
-                                    }
-                                }
-                                laps_detectados.append(lap_info)
-                                
-                                # Saltar los datos del lap
-                                cursor += LAP_DATA_BITS_LENGTH
-                                continue
-                    except:
-                        pass
-            
-            cursor += 100  # Avanzar en chunks más pequeños
-        
-        return laps_detectados
-        
-    except Exception as e:
-        return {
-            'error': f'Error extrayendo laps: {str(e)}',
-            'laps': []
-        }
+        laps_header = sess.raw[0][161]
+    except (IndexError, TypeError):
+        laps_header = None
+
+    return laps, laps_header
 
 
-def extraer_laps_alternativos(sess):
-    """
-    Método alternativo para detectar laps usando el parser existente.
-    Intenta parsear samples y detectar cuando se encuentran laps.
-    """
-    laps_info = []
-    
-    if not sess.has_hr:
-        return laps_info
-    
-    try:
-        # Crear una versión modificada del parser para detectar laps
-        original_cursor = 0
-        lap_count = 0
-        
-        # Simular el proceso de parsing para detectar laps
-        sess_copy = TrainingSession(sess.raw)
-        samples_bits = sess_copy._get_samples_bits()
-        
-        # Usar el método _has_lap_data del parser original
-        cursor = 0
-        sample_count = 0
-        
-        # Parsear samples hasta encontrar laps
-        while cursor < len(samples_bits) - 500:  # Margen de seguridad
-            try:
-                # Simular posición del cursor
-                sess_copy._cursor = cursor
-                
-                # Verificar si hay lap data en esta posición
-                if hasattr(sess_copy, '_has_lap_data'):
-                    if sess_copy._has_lap_data():
-                        lap_count += 1
-                        
-                        # Calcular tiempo aproximado del lap
-                        sample_rate = sess.info.get('sample_rate', 5)
-                        tiempo_aproximado = sample_count * sample_rate
-                        
-                        lap_info = {
-                            'lap_number': lap_count,
-                            'approximate_time_seconds': tiempo_aproximado,
-                            'approximate_time_formatted': f"{tiempo_aproximado // 60:02d}:{tiempo_aproximado % 60:02d}",
-                            'sample_position': sample_count,
-                            'detected_by_parser': True
-                        }
-                        laps_info.append(lap_info)
-                        
-                        # Saltar los datos del lap
-                        cursor += 416  # LAP_DATA_BITS_LENGTH
-                
-                # Avanzar al siguiente sample
-                cursor += 50  # Estimación del tamaño promedio de un sample
-                sample_count += 1
-                
-            except:
-                cursor += 10
-                
-        return laps_info
-        
-    except Exception as e:
-        return [{
-            'error': f'Error en detección alternativa: {str(e)}',
-            'method': 'alternative'
-        }]
 
 
 def extraer_info_basica(raw_session):
@@ -327,42 +275,14 @@ def parsear_sesion_completa(raw_session):
             datos['hr_samples'] = []
             datos['num_hr_samples'] = 0
 
-        # Intentar extraer información de laps
-        laps_info = []
-        try:
-            # Método directo: usar sess.laps si la librería lo expone
-            if hasattr(sess, 'laps') and sess.laps:
-                for i, lap in enumerate(sess.laps, 1):
-                    lap_data = {'lap_number': i}
-                    if hasattr(lap, 'duration'):
-                        lap_data['duration_seconds'] = lap.duration
-                        lap_data['duration_formatted'] = f"{lap.duration // 60:02d}:{lap.duration % 60:02d}"
-                    if hasattr(lap, 'hr_avg') and _hr_valido(lap.hr_avg):
-                        lap_data['hr_avg'] = lap.hr_avg
-                    if hasattr(lap, 'hr_max') and _hr_valido(lap.hr_max):
-                        lap_data['hr_max'] = lap.hr_max
-                    if hasattr(lap, 'hr_min') and _hr_valido(lap.hr_min):
-                        lap_data['hr_min'] = lap.hr_min
-                    laps_info.append(lap_data)
-
-            # Fallback: métodos alternativos si lo anterior no produjo laps
-            if not laps_info:
-                laps_basicos = extraer_laps_basicos(raw_session)
-                if isinstance(laps_basicos, list) and laps_basicos:
-                    laps_info = laps_basicos
-
-            if not laps_info:
-                laps_alternativos = extraer_laps_alternativos(sess)
-                if isinstance(laps_alternativos, list) and laps_alternativos:
-                    laps_info = laps_alternativos
-
-        except Exception:
-            laps_info = []
-        
-        # Agregar información de laps a los datos
-        datos['laps'] = laps_info
-        datos['num_laps'] = len([lap for lap in laps_info if not lap.get('error')])
-        datos['has_laps'] = datos['num_laps'] > 0
+        # Detección de laps por bloques de baja densidad en el stream
+        laps_detectados, laps_header = detectar_laps_nogps(sess)
+        datos['laps']       = laps_detectados
+        datos['num_laps']   = len(laps_detectados)
+        datos['has_laps']   = len(laps_detectados) > 0
+        # laps_header: conteo del byte 161 del header para validación cruzada
+        if laps_header is not None:
+            datos['num_laps_header'] = laps_header
         
         return datos
         

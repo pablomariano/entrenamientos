@@ -20,27 +20,81 @@ interface HREvolutionChartProps {
   onClose: () => void
 }
 
-function getLapSeparators(laps: Lap[]): Array<{ time_seconds: number; lap_number: number }> {
+interface LapSeparator {
+  time_seconds: number
+  lap_number: number
+}
+
+function getLapSeparators(laps: Lap[]): LapSeparator[] {
   if (!laps || laps.length === 0) return []
 
-  // Laps con duration_seconds: acumular para obtener tiempo de corte entre laps
-  if (laps[0]?.duration_seconds !== undefined) {
-    let cumulative = 0
-    return laps.slice(0, -1).map((lap, i) => {
-      cumulative += lap.duration_seconds!
-      return { time_seconds: cumulative, lap_number: i + 1 }
-    })
+  // Formato real Polar RCX5: time_seconds = tiempo absoluto desde inicio de sesión
+  if (laps[0]?.time_seconds !== undefined) {
+    return laps
+      .filter((lap) => (lap.time_seconds ?? 0) > 0)
+      .map((lap) => ({
+        time_seconds: lap.time_seconds!,
+        lap_number: lap.lap_number,
+      }))
   }
 
-  // Laps con approximate_time_seconds: ya es tiempo absoluto desde inicio
+  // Laps con duration_seconds individual: acumular para obtener el tiempo de corte
+  if (laps[0]?.duration_seconds !== undefined) {
+    const separators: LapSeparator[] = []
+    let cumulative = 0
+    for (let i = 0; i < laps.length - 1; i++) {
+      cumulative += laps[i].duration_seconds!
+      if (cumulative > 0) {
+        separators.push({ time_seconds: cumulative, lap_number: i + 1 })
+      }
+    }
+    return separators
+  }
+
+  // Laps con approximate_time_seconds (método alternativo de detección)
   if (laps[0]?.approximate_time_seconds !== undefined) {
-    return laps.map((lap) => ({
-      time_seconds: lap.approximate_time_seconds!,
-      lap_number: lap.lap_number,
-    }))
+    return laps
+      .filter((lap) => (lap.approximate_time_seconds ?? 0) > 0)
+      .map((lap) => ({
+        time_seconds: lap.approximate_time_seconds!,
+        lap_number: lap.lap_number,
+      }))
   }
 
   return []
+}
+
+// Etiqueta personalizada para los marcadores de lap en el gráfico
+function LapMarkerLabel(props: {
+  viewBox?: { x: number; y: number; width: number; height: number }
+  lapNumber: number
+}) {
+  const { viewBox, lapNumber } = props
+  if (!viewBox) return null
+  const { x, y } = viewBox
+  const w = 38
+  const h = 19
+  return (
+    <g>
+      {/* Triángulo apuntando hacia abajo indicando el lap */}
+      <polygon
+        points={`${x},${y + h + 5} ${x - 5},${y + h - 1} ${x + 5},${y + h - 1}`}
+        fill="#4f46e5"
+        opacity={0.9}
+      />
+      <rect x={x - w / 2} y={y + 4} width={w} height={h} rx={4} fill="#4f46e5" opacity={0.9} />
+      <text
+        x={x}
+        y={y + 4 + h / 2 + 4}
+        textAnchor="middle"
+        fontSize={10}
+        fontWeight="bold"
+        fill="white"
+      >
+        Lap {lapNumber}
+      </text>
+    </g>
+  )
 }
 
 const HR_MIN_VALID = 30
@@ -123,8 +177,8 @@ export function HREvolutionChart({ session, onClose }: HREvolutionChartProps) {
             Esta sesión no tiene muestras de frecuencia cardíaca disponibles.
           </div>
         ) : (
-          <ResponsiveContainer width="100%" height={360}>
-            <LineChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 20 }}>
+          <ResponsiveContainer width="100%" height={380}>
+            <LineChart data={chartData} margin={{ top: 40, right: 30, left: 0, bottom: 20 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" />
 
               <XAxis
@@ -184,20 +238,18 @@ export function HREvolutionChart({ session, onClose }: HREvolutionChartProps) {
               {/* Separadores de laps */}
               {lapSeparators.map((lap) => {
                 const xVal = lap.time_seconds / 60
-                if (xVal <= 0 || xVal >= maxTimeMins) return null
+                if (xVal <= 0 || xVal > xMax) return null
+                const lapNum = lap.lap_number
                 return (
                   <ReferenceLine
-                    key={lap.lap_number}
+                    key={lapNum}
                     x={xVal}
-                    stroke="hsl(239 84% 67%)"
+                    stroke="#4f46e5"
                     strokeDasharray="6 3"
                     strokeWidth={2}
-                    label={{
-                      value: `Lap ${lap.lap_number}`,
-                      position: "insideTopLeft",
-                      fontSize: 11,
-                      fill: "hsl(239 84% 50%)",
-                    }}
+                    label={(props: { viewBox?: { x: number; y: number; width: number; height: number } }) =>
+                      <LapMarkerLabel viewBox={props.viewBox} lapNumber={lapNum} />
+                    }
                   />
                 )
               })}

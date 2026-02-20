@@ -352,13 +352,111 @@ def diagnosticar_sesion(i, raw_session):
             print(f"\n  *** El parser mejorado encontró {valid_ext - std_total} muestras más ***")
 
 
+def investigar_laps(raw_session, num_laps_conocidos):
+    """
+    Analiza en profundidad el binario de una sesión para identificar el formato
+    de los bloques de lap. Requiere saber la cantidad real de laps de la sesión.
+    """
+    first_packet = raw_session[0]
+
+    print(f"\n{'='*70}")
+    print(f"  INVESTIGACIÓN DE LAPS  (laps reales: {num_laps_conocidos})")
+    print(f"{'='*70}")
+
+    # --- 1. Buscar en el header qué byte podría ser el conteo de laps ---
+    print(f"\n[1] Bytes del header con valor == {num_laps_conocidos} (candidatos a conteo de laps):")
+    # Bytes ya conocidos del protocolo (no son lap count)
+    bytes_conocidos = {35,36,37,38,39,40,41,42,43,44,50,54,165,166,167,201,203,205,219}
+    candidatos = [i for i, b in enumerate(first_packet) if b == num_laps_conocidos and i not in bytes_conocidos]
+    if candidatos:
+        for idx in candidatos:
+            print(f"    Byte {idx:3d} = {num_laps_conocidos}")
+    else:
+        print(f"    Ningún byte desconocido tiene el valor {num_laps_conocidos}")
+
+    # También mostrar bytes cercanos a los conocidos para dar contexto
+    print(f"\n[2] Header bytes 195–220 (zona de estadísticas HR, posible zona de laps):")
+    for i in range(195, min(221, len(first_packet))):
+        marca = " ← CANDIDATO" if i in candidatos else ""
+        print(f"    [{i:3d}] = {first_packet[i]:3d}  (0x{first_packet[i]:02X}){marca}")
+
+    # --- 2. Analizar el stream de bits ---
+    sess = TrainingSession(raw_session)
+    if sess.has_gps:
+        sess.has_gps = False
+        sess._samples_bits = sess._get_samples_bits()
+
+    bits = sess._samples_bits
+    total_bits = len(bits)
+    LAP_BITS = 416
+
+    print(f"\n[3] Análisis del stream ({total_bits} bits disponibles)")
+    print(f"    Si hay {num_laps_conocidos} laps, deberían existir {num_laps_conocidos} bloques de ~{LAP_BITS} bits intercalados.")
+
+    # Buscar secuencias de bytes con bajo contenido de información (posibles separadores)
+    # Un bloque de lap en no-GPS podría contener datos estructurados vs. HR delta
+    # Buscamos ventanas donde la densidad de bits 1 es atípica (>70% o <30%)
+    window = 48  # 6 bytes
+    anomalias = []
+    for pos in range(0, total_bits - window, 8):
+        chunk = bits[pos:pos+window]
+        ones = chunk.count('1')
+        ratio = ones / window
+        if ratio < 0.20 or ratio > 0.80:
+            anomalias.append((pos, ratio, chunk))
+
+    print(f"\n[4] Zonas con densidad de bits anómala (<20% o >80% de unos) — posibles marcadores de lap:")
+    if anomalias:
+        # Agrupar anomalías contiguas
+        grupos = []
+        grupo_actual = [anomalias[0]]
+        for a in anomalias[1:]:
+            if a[0] - grupo_actual[-1][0] <= window:
+                grupo_actual.append(a)
+            else:
+                grupos.append(grupo_actual)
+                grupo_actual = [a]
+        grupos.append(grupo_actual)
+
+        print(f"    Grupos detectados: {len(grupos)}")
+        for g in grupos[:20]:
+            inicio = g[0][0]
+            fin = g[-1][0] + window
+            long = fin - inicio
+            ratio_prom = sum(x[1] for x in g) / len(g)
+            print(f"    bits {inicio:6d}–{fin:6d}  ({long:4d} bits)  densidad={ratio_prom:.0%}")
+    else:
+        print("    No se encontraron zonas anómalas.")
+
+    # --- 3. Mostrar los primeros bytes del stream en hex para inspección manual ---
+    print(f"\n[5] Primeros 64 bytes del stream de samples (hex):")
+    hex_bytes = []
+    for i in range(0, min(512, total_bits - 7), 8):
+        byte_val = int(bits[i:i+8], 2)
+        hex_bytes.append(f"{byte_val:02X}")
+    print("    " + " ".join(hex_bytes[:32]))
+    if len(hex_bytes) > 32:
+        print("    " + " ".join(hex_bytes[32:64]))
+
+    print(f"\n[6] Últimos 32 bytes del stream de samples (hex):")
+    hex_end = []
+    start_end = max(0, total_bits - 256)
+    for i in range(start_end, total_bits - 7, 8):
+        byte_val = int(bits[i:i+8], 2)
+        hex_end.append(f"{byte_val:02X}")
+    print("    " + " ".join(hex_end[:32]))
+
+
 def main():
     print("="*70)
     print("DIAGNÓSTICO DE SESIONES - Polar RCX5")
     print("="*70)
-    print("\nEste script analiza el parsing de las sesiones en detalle.\n")
+    print("\nModos disponibles:")
+    print("  1 = Diagnóstico general de todas las sesiones")
+    print("  2 = Investigar laps de la última sesión")
+    modo = input("\nModo [1/2]: ").strip()
 
-    input("Presiona ENTER cuando hayas seleccionado 'Connect > Start synchronizing' en tu reloj...")
+    input("\nPresiona ENTER cuando hayas seleccionado 'Connect > Start synchronizing' en tu reloj...")
 
     try:
         print("\nSincronizando...")
@@ -368,8 +466,20 @@ def main():
 
         print(f"✓ {len(raw_sessions)} sesiones encontradas")
 
-        for i, raw in enumerate(raw_sessions, 1):
-            diagnosticar_sesion(i, raw)
+        if modo == '2':
+            if not raw_sessions:
+                print("No hay sesiones.")
+            else:
+                ultima = raw_sessions[-1]
+                resp = input(f"\n¿Cuántos laps registraste en la última sesión? ").strip()
+                try:
+                    n = int(resp)
+                except ValueError:
+                    n = 1
+                investigar_laps(ultima, n)
+        else:
+            for i, raw in enumerate(raw_sessions, 1):
+                diagnosticar_sesion(i, raw)
 
         print(f"\n{'='*70}")
         print("Diagnóstico completado.")
